@@ -4,23 +4,27 @@ import numpy as np
 import plotly.express as px
 from sklearn.ensemble import IsolationForest
 
-# ------------------------------------------------
+# -------------------------------------
 # CONFIG
-# ------------------------------------------------
-st.set_page_config(
-    page_title="IFSC AML Monitoring System",
-    layout="wide"
-)
-
+# -------------------------------------
+st.set_page_config(page_title="IFSC AML Monitoring System", layout="wide")
 st.title("IFSC Risk-Based AML Monitoring System")
 
-# ------------------------------------------------
-# LOAD DATA
-# ------------------------------------------------
-@st.cache_data
-def load_data():
-    df = pd.read_csv("creditcard.csv")
+# -------------------------------------
+# FILE UPLOAD
+# -------------------------------------
+uploaded_file = st.file_uploader(
+    "Upload Credit Card Dataset (creditcard.csv)",
+    type=["csv"]
+)
 
+if uploaded_file is not None:
+
+    df = pd.read_csv(uploaded_file)
+
+    # ------------------------------
+    # ADD AML STYLE FIELDS
+    # ------------------------------
     countries = ["India","UAE","UK","Singapore","Cayman Islands","Panama"]
     high_risk = ["Cayman Islands","Panama"]
 
@@ -31,128 +35,123 @@ def load_data():
         lambda x: 1 if x in high_risk else 0
     )
 
-    return df
+    # ------------------------------
+    # AML RULE ENGINE
+    # ------------------------------
+    def aml_rule_engine(row):
 
-df = load_data()
+        score = 0
 
-# ------------------------------------------------
-# AML RULE ENGINE
-# ------------------------------------------------
-def aml_rule_engine(row):
+        if row["Amount"] > 2000:
+            score += 25
 
-    score = 0
+        if row["Class"] == 1:
+            score += 40
 
-    if row["Amount"] > 2000:
-        score += 25
+        if row["high_risk_country_flag"] == 1:
+            score += 35
 
-    if row["Class"] == 1:
-        score += 40
+        return score
 
-    if row["high_risk_country_flag"] == 1:
-        score += 35
+    df["rule_score"] = df.apply(aml_rule_engine,axis=1)
 
-    return score
+    # ------------------------------
+    # ML ANOMALY DETECTION
+    # ------------------------------
+    model = IsolationForest(contamination=0.01,random_state=42)
+    df["anomaly"] = model.fit_predict(df[["Amount","Time"]])
 
-df["rule_score"] = df.apply(aml_rule_engine,axis=1)
+    df["alert"] = np.where(
+        (df["rule_score"] >= 40) | (df["anomaly"] == -1),
+        1,
+        0
+    )
 
-# ------------------------------------------------
-# ML ANOMALY DETECTION
-# ------------------------------------------------
-model = IsolationForest(contamination=0.01,random_state=42)
-df["anomaly"] = model.fit_predict(df[["Amount","Time"]])
+    # ------------------------------
+    # NAVIGATION
+    # ------------------------------
+    page = st.sidebar.radio(
+        "Navigation",
+        ["Dashboard","Transaction Monitoring",
+         "Risk Scoring","Alert Queue","STR Generator"]
+    )
 
-df["alert"] = np.where(
-    (df["rule_score"] >= 40) | (df["anomaly"] == -1),
-    1,
-    0
-)
+    # ------------------------------
+    # DASHBOARD
+    # ------------------------------
+    if page == "Dashboard":
 
-# ------------------------------------------------
-# SIDEBAR NAVIGATION
-# ------------------------------------------------
-page = st.sidebar.radio(
-    "Navigation",
-    ["Dashboard","Transaction Monitoring","Risk Scoring","Alert Queue","STR Generator"]
-)
+        st.subheader("AML Dashboard")
 
-# ------------------------------------------------
-# DASHBOARD
-# ------------------------------------------------
-if page == "Dashboard":
+        c1,c2,c3,c4 = st.columns(4)
 
-    st.subheader("AML Dashboard")
+        c1.metric("Total Transactions",len(df))
+        c2.metric("Fraud Labelled",int(df["Class"].sum()))
+        c3.metric("AML Alerts",int(df["alert"].sum()))
+        c4.metric("Average Amount",round(df["Amount"].mean(),2))
 
-    c1,c2,c3,c4 = st.columns(4)
+        fig1 = px.histogram(df,x="Amount",
+                            title="Transaction Amount Distribution")
+        st.plotly_chart(fig1,use_container_width=True)
 
-    c1.metric("Total Transactions",len(df))
-    c2.metric("Fraud Labelled",int(df["Class"].sum()))
-    c3.metric("AML Alerts",int(df["alert"].sum()))
-    c4.metric("Avg Amount",round(df["Amount"].mean(),2))
+        fig2 = px.pie(df,names="destination_country",
+                      title="Country Exposure")
+        st.plotly_chart(fig2,use_container_width=True)
 
-    fig1 = px.histogram(df,x="Amount",title="Transaction Amount Distribution")
-    st.plotly_chart(fig1,use_container_width=True)
+    # ------------------------------
+    # MONITORING
+    # ------------------------------
+    elif page == "Transaction Monitoring":
 
-    fig2 = px.pie(df,names="destination_country",title="Country Exposure")
-    st.plotly_chart(fig2,use_container_width=True)
+        st.subheader("Transaction Monitoring")
+        st.dataframe(df.head(100))
 
-# ------------------------------------------------
-# TRANSACTION MONITORING
-# ------------------------------------------------
-elif page == "Transaction Monitoring":
+    # ------------------------------
+    # RISK SCORING
+    # ------------------------------
+    elif page == "Risk Scoring":
 
-    st.subheader("Transaction Monitoring")
+        st.subheader("Risk-Based Scoring")
 
-    st.dataframe(df.head(100))
+        sample = df.sample(1).iloc[0]
+        risk_score = sample["rule_score"]
 
-# ------------------------------------------------
-# RISK SCORING
-# ------------------------------------------------
-elif page == "Risk Scoring":
+        if risk_score >= 60:
+            level = "High"
+        elif risk_score >= 30:
+            level = "Medium"
+        else:
+            level = "Low"
 
-    st.subheader("Risk-Based Scoring")
+        st.json(sample.to_dict())
+        st.success(f"Risk Score: {risk_score}")
+        st.warning(f"Risk Level: {level}")
 
-    sample = df.sample(1).iloc[0]
+    # ------------------------------
+    # ALERT QUEUE
+    # ------------------------------
+    elif page == "Alert Queue":
 
-    risk_score = sample["rule_score"]
+        st.subheader("AML Alerts")
 
-    if risk_score >= 60:
-        level = "High"
-    elif risk_score >= 30:
-        level = "Medium"
-    else:
-        level = "Low"
+        alerts = df[df["alert"] == 1]
 
-    st.json(sample.to_dict())
+        st.metric("Total Alerts",len(alerts))
+        st.dataframe(alerts.head(100))
 
-    st.success(f"Risk Score: {risk_score}")
-    st.warning(f"Risk Level: {level}")
+    # ------------------------------
+    # STR GENERATOR
+    # ------------------------------
+    elif page == "STR Generator":
 
-# ------------------------------------------------
-# ALERT QUEUE
-# ------------------------------------------------
-elif page == "Alert Queue":
+        st.subheader("Suspicious Transaction Report")
 
-    st.subheader("AML Alerts")
+        tx_id = st.text_input("Transaction ID")
+        reason = st.text_area("Reason for Suspicion")
 
-    alerts = df[df["alert"] == 1]
+        if st.button("Generate STR"):
 
-    st.metric("Total Alerts",len(alerts))
-
-    st.dataframe(alerts.head(100))
-
-# ------------------------------------------------
-# STR GENERATOR
-# ------------------------------------------------
-elif page == "STR Generator":
-
-    st.subheader("Suspicious Transaction Report")
-
-    tx_id = st.text_input("Transaction ID")
-    reason = st.text_area("Reason for Suspicion")
-
-    if st.button("Generate STR"):
-
-        report = f"""
+            report = f"""
 Suspicious Transaction Report
 
 Transaction ID: {tx_id}
@@ -160,11 +159,14 @@ Transaction ID: {tx_id}
 Reason:
 {reason}
 
-Generated by IFSC AML Monitoring System.
+Generated under IFSC AML Monitoring Framework.
 """
 
-        st.download_button(
-            label="Download STR",
-            data=report,
-            file_name="STR_Report.txt"
-        )
+            st.download_button(
+                label="Download STR",
+                data=report,
+                file_name="STR_Report.txt"
+            )
+
+else:
+    st.info("Please upload creditcard.csv to start AML analysis.")
