@@ -13,18 +13,15 @@ st.title("IFSC Risk-Based AML Monitoring System")
 # -------------------------------------
 # FILE UPLOAD
 # -------------------------------------
-uploaded_file = st.file_uploader(
-    "Upload Credit Card Dataset (creditcard.csv)",
-    type=["csv"]
-)
+uploaded_file = st.file_uploader("Upload creditcard.csv", type=["csv"])
 
 if uploaded_file is not None:
 
     df = pd.read_csv(uploaded_file)
 
-    # ------------------------------
+    # -------------------------------------
     # ADD AML STYLE FIELDS
-    # ------------------------------
+    # -------------------------------------
     countries = ["India","UAE","UK","Singapore","Cayman Islands","Panama"]
     high_risk = ["Cayman Islands","Panama"]
 
@@ -35,15 +32,39 @@ if uploaded_file is not None:
         lambda x: 1 if x in high_risk else 0
     )
 
-    # ------------------------------
+    # -------------------------------------
+    # DYNAMIC INVESTIGATION THRESHOLD
+    # -------------------------------------
+    percentile = st.sidebar.slider(
+        "Investigation Threshold Percentile",
+        80, 99, 95
+    )
+
+    investigate_threshold = df["Amount"].quantile(percentile/100)
+    high_risk_threshold = df["Amount"].quantile(0.99)
+
+    def amount_risk(amount):
+
+        if amount > high_risk_threshold:
+            return "High Risk – Immediate Review"
+
+        elif amount > investigate_threshold:
+            return "Higher Risk – Investigate"
+
+        else:
+            return "Normal"
+
+    df["amount_risk_flag"] = df["Amount"].apply(amount_risk)
+
+    # -------------------------------------
     # AML RULE ENGINE
-    # ------------------------------
+    # -------------------------------------
     def aml_rule_engine(row):
 
         score = 0
 
-        if row["Amount"] > 2000:
-            score += 25
+        if row["amount_risk_flag"] != "Normal":
+            score += 30
 
         if row["Class"] == 1:
             score += 40
@@ -55,9 +76,9 @@ if uploaded_file is not None:
 
     df["rule_score"] = df.apply(aml_rule_engine,axis=1)
 
-    # ------------------------------
+    # -------------------------------------
     # ML ANOMALY DETECTION
-    # ------------------------------
+    # -------------------------------------
     model = IsolationForest(contamination=0.01,random_state=42)
     df["anomaly"] = model.fit_predict(df[["Amount","Time"]])
 
@@ -67,18 +88,19 @@ if uploaded_file is not None:
         0
     )
 
-    # ------------------------------
+    # -------------------------------------
     # NAVIGATION
-    # ------------------------------
+    # -------------------------------------
     page = st.sidebar.radio(
         "Navigation",
         ["Dashboard","Transaction Monitoring",
-         "Risk Scoring","Alert Queue","STR Generator"]
+         "Risk Scoring","Investigation Queue",
+         "STR Generator"]
     )
 
-    # ------------------------------
+    # -------------------------------------
     # DASHBOARD
-    # ------------------------------
+    # -------------------------------------
     if page == "Dashboard":
 
         st.subheader("AML Dashboard")
@@ -88,60 +110,50 @@ if uploaded_file is not None:
         c1.metric("Total Transactions",len(df))
         c2.metric("Fraud Labelled",int(df["Class"].sum()))
         c3.metric("AML Alerts",int(df["alert"].sum()))
-        c4.metric("Average Amount",round(df["Amount"].mean(),2))
+        c4.metric("Investigation Threshold",round(investigate_threshold,2))
 
-        fig1 = px.histogram(df,x="Amount",
-                            title="Transaction Amount Distribution")
-        st.plotly_chart(fig1,use_container_width=True)
+        fig = px.histogram(df,x="Amount")
+        st.plotly_chart(fig,use_container_width=True)
 
-        fig2 = px.pie(df,names="destination_country",
-                      title="Country Exposure")
-        st.plotly_chart(fig2,use_container_width=True)
-
-    # ------------------------------
+    # -------------------------------------
     # MONITORING
-    # ------------------------------
+    # -------------------------------------
     elif page == "Transaction Monitoring":
 
         st.subheader("Transaction Monitoring")
+
         st.dataframe(df.head(100))
 
-    # ------------------------------
+    # -------------------------------------
     # RISK SCORING
-    # ------------------------------
+    # -------------------------------------
     elif page == "Risk Scoring":
 
         st.subheader("Risk-Based Scoring")
 
         sample = df.sample(1).iloc[0]
-        risk_score = sample["rule_score"]
-
-        if risk_score >= 60:
-            level = "High"
-        elif risk_score >= 30:
-            level = "Medium"
-        else:
-            level = "Low"
 
         st.json(sample.to_dict())
-        st.success(f"Risk Score: {risk_score}")
-        st.warning(f"Risk Level: {level}")
 
-    # ------------------------------
-    # ALERT QUEUE
-    # ------------------------------
-    elif page == "Alert Queue":
+        st.success(f"Rule Score: {sample['rule_score']}")
+        st.warning(f"Amount Risk: {sample['amount_risk_flag']}")
 
-        st.subheader("AML Alerts")
+    # -------------------------------------
+    # INVESTIGATION QUEUE
+    # -------------------------------------
+    elif page == "Investigation Queue":
 
-        alerts = df[df["alert"] == 1]
+        st.subheader("Higher Risk – Investigation Required")
 
-        st.metric("Total Alerts",len(alerts))
-        st.dataframe(alerts.head(100))
+        investigate_df = df[
+            df["amount_risk_flag"] != "Normal"
+        ]
 
-    # ------------------------------
+        st.dataframe(investigate_df.head(100))
+
+    # -------------------------------------
     # STR GENERATOR
-    # ------------------------------
+    # -------------------------------------
     elif page == "STR Generator":
 
         st.subheader("Suspicious Transaction Report")
@@ -169,4 +181,4 @@ Generated under IFSC AML Monitoring Framework.
             )
 
 else:
-    st.info("Please upload creditcard.csv to start AML analysis.")
+    st.info("Upload creditcard.csv to begin AML monitoring.")
