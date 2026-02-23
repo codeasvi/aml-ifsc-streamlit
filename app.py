@@ -3,182 +3,219 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 from sklearn.ensemble import IsolationForest
+from sklearn.metrics import classification_report, confusion_matrix
 
-# -------------------------------------
+# ------------------------------------------------
 # CONFIG
-# -------------------------------------
-st.set_page_config(page_title="IFSC AML Monitoring System", layout="wide")
-st.title("IFSC Risk-Based AML Monitoring System")
+# ------------------------------------------------
+st.set_page_config(page_title="IFSC AML Monitoring (Advanced)", layout="wide")
+st.title("IFSC Risk-Based AML Monitoring System — Advanced")
 
-# -------------------------------------
-# FILE UPLOAD
-# -------------------------------------
-uploaded_file = st.file_uploader("Upload creditcard.csv", type=["csv"])
+# ------------------------------------------------
+# FAST UPLOAD + VALIDATION
+# ------------------------------------------------
+uploaded_file = st.file_uploader("Upload CSV (creditcard.csv)", type=["csv"])
 
-if uploaded_file is not None:
+if uploaded_file is None:
+    st.info("Upload dataset to start.")
+    st.stop()
 
-    df = pd.read_csv(uploaded_file)
+@st.cache_data
+def load_df(file):
+    df = pd.read_csv(file)
+    return df
 
-    # -------------------------------------
-    # ADD AML STYLE FIELDS
-    # -------------------------------------
-    countries = ["India","UAE","UK","Singapore","Cayman Islands","Panama"]
-    high_risk = ["Cayman Islands","Panama"]
+df = load_df(uploaded_file)
 
-    df["origin_country"] = np.random.choice(countries,len(df))
-    df["destination_country"] = np.random.choice(countries,len(df))
+required_cols = ["Time", "Amount"]
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    st.error(f"Missing required columns: {missing}")
+    st.stop()
 
-    df["high_risk_country_flag"] = df["destination_country"].apply(
-        lambda x: 1 if x in high_risk else 0
-    )
+if "Class" not in df.columns:
+    df["Class"] = 0  # fallback if labels absent
 
-    # -------------------------------------
-    # DYNAMIC INVESTIGATION THRESHOLD
-    # -------------------------------------
-    percentile = st.sidebar.slider(
-        "Investigation Threshold Percentile",
-        80, 99, 95
-    )
+# ------------------------------------------------
+# AML CONTEXT SIMULATION (GEOGRAPHY RISK)
+# ------------------------------------------------
+countries = ["India","UAE","UK","Singapore","Cayman Islands","Panama"]
+high_risk = ["Cayman Islands","Panama"]
 
-    investigate_threshold = df["Amount"].quantile(percentile/100)
-    high_risk_threshold = df["Amount"].quantile(0.99)
+np.random.seed(42)
+df["origin_country"] = np.random.choice(countries, len(df))
+df["destination_country"] = np.random.choice(countries, len(df))
+df["high_risk_country_flag"] = df["destination_country"].isin(high_risk).astype(int)
 
-    def amount_risk(amount):
+# ------------------------------------------------
+# DYNAMIC THRESHOLDS (NOT STATIC)
+# ------------------------------------------------
+percentile = st.sidebar.slider("Investigation Threshold Percentile", 80, 99, 95)
+investigate_threshold = df["Amount"].quantile(percentile/100)
+high_threshold = df["Amount"].quantile(0.99)
 
-        if amount > high_risk_threshold:
-            return "High Risk – Immediate Review"
+# ------------------------------------------------
+# BEHAVIORAL BASELINE MODELING
+# ------------------------------------------------
+global_avg = df["Amount"].mean()
+df["behavior_deviation"] = df["Amount"] / (global_avg + 1e-6)
 
-        elif amount > investigate_threshold:
-            return "Higher Risk – Investigate"
+# ------------------------------------------------
+# VELOCITY (SMURFING) DETECTION
+# ------------------------------------------------
+df = df.sort_values("Time")
+df["time_diff"] = df["Time"].diff().fillna(99999)
+df["velocity_flag"] = (df["time_diff"] < 10).astype(int)
 
-        else:
-            return "Normal"
+# ------------------------------------------------
+# AMOUNT RISK CLASSIFICATION
+# ------------------------------------------------
+def amount_risk(amount):
+    if amount > high_threshold:
+        return "High Risk – Immediate Review"
+    elif amount > investigate_threshold:
+        return "Higher Risk – Investigate"
+    else:
+        return "Normal"
 
-    df["amount_risk_flag"] = df["Amount"].apply(amount_risk)
+df["amount_risk_flag"] = df["Amount"].apply(amount_risk)
 
-    # -------------------------------------
-    # AML RULE ENGINE
-    # -------------------------------------
-    def aml_rule_engine(row):
+# ------------------------------------------------
+# ML ANOMALY DETECTION
+# ------------------------------------------------
+model = IsolationForest(contamination=0.01, random_state=42)
+df["anomaly"] = model.fit_predict(df[["Amount","Time"]])
 
-        score = 0
+# ------------------------------------------------
+# HYBRID RISK SCORE (RBA MODEL)
+# ------------------------------------------------
+def risk_engine(row):
+    score = 0
+    reasons = []
 
-        if row["amount_risk_flag"] != "Normal":
-            score += 30
+    if row["amount_risk_flag"] != "Normal":
+        score += 25
+        reasons.append("High Amount")
 
-        if row["Class"] == 1:
-            score += 40
+    if row["behavior_deviation"] > 5:
+        score += 20
+        reasons.append("Behavior Deviation")
 
-        if row["high_risk_country_flag"] == 1:
-            score += 35
+    if row["velocity_flag"] == 1:
+        score += 15
+        reasons.append("High Velocity")
 
-        return score
+    if row["high_risk_country_flag"] == 1:
+        score += 20
+        reasons.append("High-Risk Geography")
 
-    df["rule_score"] = df.apply(aml_rule_engine,axis=1)
+    if row["anomaly"] == -1:
+        score += 30
+        reasons.append("ML Anomaly")
 
-    # -------------------------------------
-    # ML ANOMALY DETECTION
-    # -------------------------------------
-    model = IsolationForest(contamination=0.01,random_state=42)
-    df["anomaly"] = model.fit_predict(df[["Amount","Time"]])
+    if row["Class"] == 1:
+        score += 10
+        reasons.append("Labelled Fraud")
 
-    df["alert"] = np.where(
-        (df["rule_score"] >= 40) | (df["anomaly"] == -1),
-        1,
-        0
-    )
+    return pd.Series([score, ", ".join(reasons)])
 
-    # -------------------------------------
-    # NAVIGATION
-    # -------------------------------------
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Dashboard","Transaction Monitoring",
-         "Risk Scoring","Investigation Queue",
-         "STR Generator"]
-    )
+df[["risk_score","risk_reasons"]] = df.apply(risk_engine, axis=1)
 
-    # -------------------------------------
-    # DASHBOARD
-    # -------------------------------------
-    if page == "Dashboard":
+df["alert"] = (df["risk_score"] >= 40).astype(int)
 
-        st.subheader("AML Dashboard")
+# ------------------------------------------------
+# NAVIGATION
+# ------------------------------------------------
+page = st.sidebar.radio(
+    "Navigation",
+    ["Dashboard","Monitoring","Investigation Queue","Evaluation","STR Generator"]
+)
 
-        c1,c2,c3,c4 = st.columns(4)
+# ------------------------------------------------
+# DASHBOARD
+# ------------------------------------------------
+if page == "Dashboard":
 
-        c1.metric("Total Transactions",len(df))
-        c2.metric("Fraud Labelled",int(df["Class"].sum()))
-        c3.metric("AML Alerts",int(df["alert"].sum()))
-        c4.metric("Investigation Threshold",round(investigate_threshold,2))
+    st.subheader("AML Overview")
 
-        fig = px.histogram(df,x="Amount")
-        st.plotly_chart(fig,use_container_width=True)
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Transactions", len(df))
+    c2.metric("Alerts", int(df["alert"].sum()))
+    c3.metric("Avg Amount", round(df["Amount"].mean(),2))
+    c4.metric("Investigate Threshold", round(investigate_threshold,2))
 
-    # -------------------------------------
-    # MONITORING
-    # -------------------------------------
-    elif page == "Transaction Monitoring":
+    fig = px.histogram(df, x="Amount", title="Amount Distribution")
+    st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Transaction Monitoring")
+    geo = px.pie(df, names="destination_country", title="Country Exposure")
+    st.plotly_chart(geo, use_container_width=True)
 
-        st.dataframe(df.head(100))
+# ------------------------------------------------
+# MONITORING VIEW
+# ------------------------------------------------
+elif page == "Monitoring":
 
-    # -------------------------------------
-    # RISK SCORING
-    # -------------------------------------
-    elif page == "Risk Scoring":
+    st.subheader("Transaction Monitoring + Explainability")
 
-        st.subheader("Risk-Based Scoring")
+    cols = ["Amount","risk_score","risk_reasons","amount_risk_flag",
+            "behavior_deviation","velocity_flag","anomaly"]
 
-        sample = df.sample(1).iloc[0]
+    st.dataframe(df[cols].head(100))
 
-        st.json(sample.to_dict())
+# ------------------------------------------------
+# INVESTIGATION QUEUE
+# ------------------------------------------------
+elif page == "Investigation Queue":
 
-        st.success(f"Rule Score: {sample['rule_score']}")
-        st.warning(f"Amount Risk: {sample['amount_risk_flag']}")
+    st.subheader("Investigation Required")
 
-    # -------------------------------------
-    # INVESTIGATION QUEUE
-    # -------------------------------------
-    elif page == "Investigation Queue":
+    investigate_df = df[df["alert"] == 1]
 
-        st.subheader("Higher Risk – Investigation Required")
+    st.metric("Total Investigation Alerts", len(investigate_df))
+    st.dataframe(investigate_df.head(100))
 
-        investigate_df = df[
-            df["amount_risk_flag"] != "Normal"
-        ]
+# ------------------------------------------------
+# EVALUATION METRICS
+# ------------------------------------------------
+elif page == "Evaluation":
 
-        st.dataframe(investigate_df.head(100))
+    st.subheader("Model Evaluation")
 
-    # -------------------------------------
-    # STR GENERATOR
-    # -------------------------------------
-    elif page == "STR Generator":
+    report = classification_report(df["Class"], df["alert"], output_dict=True)
+    st.json(report)
 
-        st.subheader("Suspicious Transaction Report")
+    cm = confusion_matrix(df["Class"], df["alert"])
+    st.write("Confusion Matrix")
+    st.write(cm)
 
-        tx_id = st.text_input("Transaction ID")
-        reason = st.text_area("Reason for Suspicion")
+# ------------------------------------------------
+# STR GENERATOR
+# ------------------------------------------------
+elif page == "STR Generator":
 
-        if st.button("Generate STR"):
+    st.subheader("Suspicious Transaction Report")
 
-            report = f"""
+    selected = df[df["alert"] == 1]
+
+    if len(selected) == 0:
+        st.warning("No alerts available.")
+    else:
+        tx = selected.sample(1).iloc[0]
+
+        narrative = f"""
 Suspicious Transaction Report
 
-Transaction ID: {tx_id}
+Amount: {tx['Amount']}
+Risk Score: {tx['risk_score']}
+Reasons: {tx['risk_reasons']}
 
-Reason:
-{reason}
-
-Generated under IFSC AML Monitoring Framework.
+This transaction exceeds dynamic risk thresholds and triggers AML monitoring alerts.
 """
 
-            st.download_button(
-                label="Download STR",
-                data=report,
-                file_name="STR_Report.txt"
-            )
+        st.text_area("Auto Narrative", narrative, height=200)
 
-else:
-    st.info("Upload creditcard.csv to begin AML monitoring.")
+        st.download_button(
+            label="Download STR",
+            data=narrative,
+            file_name="STR_Report.txt"
+        )
